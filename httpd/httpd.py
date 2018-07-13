@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import time
+import os
 import logging
 from optparse import OptionParser
 
@@ -17,16 +19,37 @@ if __name__ == "__main__":
     logging.basicConfig(
         filename=opts.log,
         level=logging.INFO,
-        format='[%(asctime)s] %(levelname).1s %(message)s',
+        format='[%(asctime)s] %(levelname).1s %(process).6d %(message)s',
         datefmt='%Y.%m.%d %H:%M:%S')
 
     server = HTTPServer(opts.root, opts.address, opts.port)
 
     logging.info("Starting server at %s" % opts.port)
-    server.listen()
+    server.bind()
+
+    pids = {}
     try:
-        logging.info("Wait for connections")
-        server.wait()
+        while True:
+            while len(pids) < opts.workers:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        logging.info("Wait for connections")
+                        server.wait()
+                    except (Exception, KeyboardInterrupt) as e:
+                        logging.exception('EXC: %s', e)
+                        server.close()
+                        raise
+                else:
+                    pids.append(pid)
+
+            for pid in pids:
+                logging.info('PROCESS\t%d', pid)
+                (pid, code) = os.waitpid(pid, os.WNOHANG)
+                logging.info('PROCESS\t\t%d; %d', pid, code)
+
+            time.sleep(0.5)
+
     except KeyboardInterrupt:
         print("Stop server")
-    server.close()
+

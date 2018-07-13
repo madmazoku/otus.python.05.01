@@ -177,6 +177,7 @@ class HTTPServer:
         self.host = host
         self.port = port
         self.socket = None
+        self.poll = None
         self.clients = {}
 
     def register(self, actor, fileno, flags):
@@ -193,32 +194,39 @@ class HTTPServer:
             del self.clients[fileno]
         self.poll.unregister(fileno)
 
-    def listen(self):
+    def bind(self):
         if self.socket is not None:
             self.close()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM | socket.SOCK_NONBLOCK)
         self.socket.bind((self.host, self.port))
-        self.socket.listen()
-        logging.info('LISTEN\t%d', self.socket.fileno())
+        logging.info('BIND\t%d', self.socket.fileno())
 
     def close(self):
+        remove = []
         for fileno, actor in self.clients.items():
             if actor.socket.fileno() != -1:
-                self.poll.unregister(actor.socket.fileno())
+                remove.append(actor.socket.fileno())
             actor.close(0)
         self.clients = {}
 
-        self.socket.close()
-        if self.socket.fileno() != -1:
-            self.poll.unregister(self.socket.fileno())
-        self.socket = None
+        if self.socket is not None:
+            self.socket.close()
+            if self.socket.fileno() != -1:
+                remove.append(actor.socket.fileno())
+            self.socket = None
 
-        self.poll.close()
-        self.poll = None
+        if self.poll is not None:
+            for fileno in remove:
+                self.poll.unregister(fileno)
+            self.poll.close()
+            self.poll = None
 
         logging.info('Connection socket closed')
 
     def wait(self, timeout=None):
+        self.socket.listen()
+        logging.info('LISTEN\t%d', self.socket.fileno())
+
         self.poll = select.epoll()
         self.poll.register(self.socket.fileno(), select.EPOLLIN)
         while True:
@@ -226,7 +234,16 @@ class HTTPServer:
             logging.info('TICK\t%s', events)
             for fileno, event in events:
                 if fileno == self.socket.fileno():
-                    client_socket, addr = self.socket.accept()
+                    client_socket = None
+                    for trynum in range(1, 10):
+                        try:
+                            client_socket, addr = self.socket.accept()
+                            break
+                        except BlockingIOError as e:
+                            if trynum == 9:
+                                raise
+                            logging.info('ERR\t%d; %s', trynum, e)
+                            time.sleep(trynum * 0.01)
                     logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
                     RequestRead(self, client_socket)
                 elif fileno in self.clients:
