@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import time
+import signal
+import os
 import logging
 from optparse import OptionParser
 
@@ -17,16 +20,49 @@ if __name__ == "__main__":
     logging.basicConfig(
         filename=opts.log,
         level=logging.INFO,
-        format='[%(asctime)s] %(levelname).1s %(message)s',
+        format='[%(asctime)s] %(levelname).1s %(process).6d %(message)s',
         datefmt='%Y.%m.%d %H:%M:%S')
 
     server = HTTPServer(opts.root, opts.address, opts.port)
 
     logging.info("Starting server at %s" % opts.port)
-    server.listen()
+    server.bind()
+
+    pids = set()
+
     try:
-        logging.info("Wait for connections")
-        server.wait()
+
+        if opts.workers == 1:
+            logging.info("Wait for connections")
+            server.wait()
+        else:
+            while True:
+                while len(pids) < opts.workers:
+                    pid = os.fork()
+                    if pid == 0:
+                        pids = None
+                        try:
+                            logging.info("Wait for connections")
+                            server.wait()
+                        except (Exception, KeyboardInterrupt):
+                            raise
+                    else:
+                        pids.add(pid)
+
+                (pid, code) = os.wait()
+                logging.info('PROCESS\tchild exited %d : %d', pid, code)
+                pids.remove(pid)
+
+    except Exception as e:
+        logging.exception('EXC: %s', e)
     except KeyboardInterrupt:
-        print("Stop server")
+        logging.info("SERVER\tstop")
+
     server.close()
+
+    if pids is not None:
+        for pid in pids:
+            (pid, code) = os.waitpid(pid, 0)
+            logging.info('PROCESS\tchild exited %d : %d', pid, code)
+        pids.clear()
+        server.unbind()
