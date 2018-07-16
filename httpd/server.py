@@ -100,12 +100,12 @@ class RequestWrite(Actor):
         self.code = INTERNAL_ERROR
         try:
             if self.method in {b'GET', b'HEAD'}:
-                match = re.search(rb'[\?#]', self.uri)
+                match = re.search(b'[\\?#]', self.uri)
                 request_path = self.uri[:len(self.uri) if match is None else match.start()]
                 parts = []
                 for part in request_path.split(b'/'):
-                    part = re.sub(rb'\+', b' ', part)
-                    part = re.sub(rb'%([0-9a-fA-F]{2})', lambda m: bytes.fromhex(m.group(1).decode('ascii')), part)
+                    part = re.sub(b'\\+', b' ', part)
+                    part = re.sub(b'%([0-9a-fA-F]{2})', lambda m: bytes.fromhex(m.group(1).decode('ascii')), part)
                     parts.append(part.decode('utf-8'))
                 self.page = self.server.root.joinpath(*parts).resolve()
 

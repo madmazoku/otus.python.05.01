@@ -61,9 +61,6 @@ if __name__ == "__main__":
     server.close()
 
     if pids is not None:
-        # for pid in pids:
-        #     logging.info('KILL PROCESS\t%d', pid)
-        #     os.kill(pid, signal.SIGINT)
         for pid in pids:
             (pid, code) = os.waitpid(pid, 0)
             logging.info('PROCESS\tchild exited %d : %d', pid, code)
