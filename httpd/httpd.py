@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import time
+import signal
 import os
 import logging
 from optparse import OptionParser
@@ -27,29 +28,44 @@ if __name__ == "__main__":
     logging.info("Starting server at %s" % opts.port)
     server.bind()
 
-    pids = {}
+    pids = set()
+
     try:
-        while True:
-            while len(pids) < opts.workers:
-                pid = os.fork()
-                if pid == 0:
-                    try:
-                        logging.info("Wait for connections")
-                        server.wait()
-                    except (Exception, KeyboardInterrupt) as e:
-                        logging.exception('EXC: %s', e)
-                        server.close()
-                        raise
-                else:
-                    pids.append(pid)
 
-            for pid in pids:
-                logging.info('PROCESS\t%d', pid)
-                (pid, code) = os.waitpid(pid, os.WNOHANG)
-                logging.info('PROCESS\t\t%d; %d', pid, code)
+        if opts.workers == 1:
+            logging.info("Wait for connections")
+            server.wait()
+        else:
+            while True:
+                while len(pids) < opts.workers:
+                    pid = os.fork()
+                    if pid == 0:
+                        pids = None
+                        try:
+                            logging.info("Wait for connections")
+                            server.wait()
+                        except (Exception, KeyboardInterrupt):
+                            raise
+                    else:
+                        pids.add(pid)
 
-            time.sleep(0.5)
+                (pid, code) = os.wait()
+                logging.info('PROCESS\tchild exited %d : %d', pid, code)
+                pids.remove(pid)
 
+    except Exception as e:
+        logging.exception('EXC: %s', e)
     except KeyboardInterrupt:
-        print("Stop server")
+        logging.info("SERVER\tstop")
 
+    server.close()
+
+    if pids is not None:
+        # for pid in pids:
+        #     logging.info('KILL PROCESS\t%d', pid)
+        #     os.kill(pid, signal.SIGINT)
+        for pid in pids:
+            (pid, code) = os.waitpid(pid, 0)
+            logging.info('PROCESS\tchild exited %d : %d', pid, code)
+        pids.clear()
+        server.unbind()

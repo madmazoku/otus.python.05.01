@@ -10,7 +10,7 @@ import logging
 import re
 
 IO_BUF_SIZE = 4 * 1 << 10
-CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP | select.EPOLLRDHUP
+CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
 
 OK = 200
 FORBIDDEN = 403
@@ -47,6 +47,7 @@ class Actor(object):
         pass
 
     def close(self, event):
+        self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
 
     def process_time(self):
@@ -70,9 +71,9 @@ class RequestRead(Actor):
 
         recieved = self.socket.recv(IO_BUF_SIZE)
         if len(recieved) == 0:
-            logging.info('CLOSE\t%d, premature end of read', self.socket.fileno())
-            self.socket.close()
+            logging.info('CLOSE\t%d, premature end of read: %s', self.socket.fileno(), self.buffer)
             self.server.unregister(self.socket.fileno())
+            self.socket.close()
         else:
             self.buffer += recieved
 
@@ -124,8 +125,13 @@ class RequestWrite(Actor):
                     self.code = FORBIDDEN
             else:
                 self.code = METHOD_NOT_ALLOWED
+        except FileNotFoundError as e:
+            logging.exception('File not found: %s', e)
+            headers = ''
+            self.code = 404
         except Exception as e:
-            logging.error('Internal error: %s', e)
+            logging.exception('Internal error: %s', e)
+            headers = ''
 
         buffer = 'HTTP/1.1 {:d} {:s}\r\n'.format(self.code, STATUS[self.code])
         buffer += datetime.datetime.utcnow().strftime('Date: %a, %d %b %Y %H:%M:%S UTC\r\n')
@@ -209,11 +215,8 @@ class HTTPServer:
             actor.close(0)
         self.clients = {}
 
-        if self.socket is not None:
-            self.socket.close()
-            if self.socket.fileno() != -1:
-                remove.append(actor.socket.fileno())
-            self.socket = None
+        if self.socket is not None and self.socket.fileno() != -1:
+            remove.append(self.socket.fileno())
 
         if self.poll is not None:
             for fileno in remove:
@@ -221,7 +224,13 @@ class HTTPServer:
             self.poll.close()
             self.poll = None
 
-        logging.info('Connection socket closed')
+        logging.info('Clients closed')
+
+    def unbind(self):
+        if self.socket is not None and self.socket.fileno() != -1:
+            self.socket.shutdown(socket.SHUT_RDWR)
+            self.socket.close()
+        self.socket = None
 
     def wait(self, timeout=None):
         self.socket.listen()
@@ -231,21 +240,22 @@ class HTTPServer:
         self.poll.register(self.socket.fileno(), select.EPOLLIN)
         while True:
             events = self.poll.poll(5)
-            logging.info('TICK\t%s', events)
+            logging.info('TICK\t%d; %s', len(events), events)
             for fileno, event in events:
                 if fileno == self.socket.fileno():
                     client_socket = None
-                    for trynum in range(1, 10):
+                    for trynum in range(1, 4):
                         try:
                             client_socket, addr = self.socket.accept()
                             break
                         except BlockingIOError as e:
-                            if trynum == 9:
-                                raise
                             logging.info('ERR\t%d; %s', trynum, e)
                             time.sleep(trynum * 0.01)
-                    logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
-                    RequestRead(self, client_socket)
+                    if client_socket is None:
+                        logging.info("ADD\tCan't add connection: %d", len(self.clients))
+                    else:
+                        logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
+                        RequestRead(self, client_socket)
                 elif fileno in self.clients:
                     if event & CLIENT_CLOSE_FLAGS:
                         self.poll.unregister(fileno)
@@ -262,9 +272,10 @@ class HTTPServer:
             for fileno, actor in self.clients.items():
                 actors.append('({:d}, {:.3f})'.format(actor.socket.fileno(), actor.process_time()))
                 if actor.process_time() > 1000:
-                    self.poll.unregister(fileno)
-                    self.clients[fileno].close(event)
+                    if actor.socket.fileno() != -1:
+                        self.poll.unregister(fileno)
+                        self.clients[fileno].close(event)
                     remove.append(fileno)
-            logging.info('ACTORS\t%s', actors)
+            logging.info('ACTORS\t%d: %s', len(actors), actors)
             for fileno in remove:
                 del self.clients[fileno]
