@@ -8,9 +8,16 @@ import socket
 import select
 import logging
 import re
+import collections
+
+ParsedRequestHeader = collections.namedtuple("ParsedRequestHeader", "status code page buffer file")
 
 IO_BUF_SIZE = 4 * 1 << 10
+IO_BUF_MAXSIZE = 10 * 1 << 20
 CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
+
+END_OF_HEADERS_TERM = b'\r\n\r\n'
+END_OF_HEADERS_TERM_LEN = len(END_OF_HEADERS_TERM)
 
 OK = 200
 FORBIDDEN = 403
@@ -38,10 +45,10 @@ CONTENT_TYPE = {
 
 
 class Actor(object):
-    def __init__(self, server, socket):
+    def __init__(self, server, socket, start_time=None):
         self.server = server
         self.socket = socket
-        self.time = time.time()
+        self.time = time.time() if start_time is None else start_time
 
     def act(self, event):
         pass
@@ -57,9 +64,8 @@ class Actor(object):
 class RequestRead(Actor):
     def __init__(self, server, socket):
         super().__init__(server, socket)
-        self.status = b''
+        self.check_index = 0
         self.buffer = b''
-        self.server.register(self, self.socket.fileno(), select.EPOLLIN)
 
     def close(self, event):
         logging.info('CLOSE\t%d; read; buffer: %s; time: %.3f', self.socket.fileno(), self.buffer, self.process_time())
@@ -70,77 +76,90 @@ class RequestRead(Actor):
             return
 
         recieved = self.socket.recv(IO_BUF_SIZE)
-        if len(recieved) == 0:
-            logging.info('CLOSE\t%d, premature end of read: %s', self.socket.fileno(), self.buffer)
+        if len(recieved) == 0 or len(self.buffer) > IO_BUF_MAXSIZE:
+            logging.info('CLOSE\t%d, premature end of read: %d: %s', self.socket.fileno(), len(self.buffer),
+                         self.buffer[:IO_BUF_SIZE])
             self.server.unregister(self.socket.fileno())
             self.socket.close()
         else:
             self.buffer += recieved
 
-        end_of_headers = self.buffer.find(b'\r\n\r\n')
+        end_of_headers = self.buffer.find(END_OF_HEADERS_TERM, self.check_index)
         if end_of_headers != -1:
-            lines = self.buffer[:end_of_headers].split(b'\r\n')
-            self.status = lines.pop(0)
-            self.buffer = b''
-            RequestWrite(self)
+            header = self.buffer[:end_of_headers]
+            parsed_request_header = self.parse_request_header(header)
+            self.buffer = self.buffer[end_of_headers + END_OF_HEADERS_TERM_LEN:]
 
+            writer = RequestWrite(self, parsed_request_header)
+            self.server.register(writer, self.socket.fileno(), select.EPOLLOUT)
+        else:
+            buffer_len = len(self.buffer)
+            self.check_index = 0 if buffer_len < END_OF_HEADERS_TERM_LEN else buffer_len - END_OF_HEADERS_TERM_LEN
 
-class RequestWrite(Actor):
-    def __init__(self, reader):
-        super().__init__(reader.server, reader.socket)
-        self.file = None
-        self.time = reader.time
-        self.status = reader.status
-        self.page = None
+    def parse_request_header(self, header):
+        lines = header.split(b'\r\n')
+        status = lines.pop(0)
 
-        (self.method, self.uri, self.version) = self.status.split(b'\x20')
+        (method, uri, version) = status.split(b'\x20')
 
         headers = ''
 
-        self.code = INTERNAL_ERROR
+        code = INTERNAL_ERROR
+        page = None
+        file = None
         try:
-            if self.method in {b'GET', b'HEAD'}:
-                match = re.search(b'[\\?#]', self.uri)
-                request_path = self.uri[:len(self.uri) if match is None else match.start()]
+            if method in {b'GET', b'HEAD'}:
+                match = re.search(b'[\\?#]', uri)
+                request_path = uri[:len(uri) if match is None else match.start()]
                 parts = []
                 for part in request_path.split(b'/'):
                     part = re.sub(b'\\+', b' ', part)
                     part = re.sub(b'%([0-9a-fA-F]{2})', lambda m: bytes.fromhex(m.group(1).decode('ascii')), part)
                     parts.append(part.decode('utf-8'))
-                self.page = self.server.root.joinpath(*parts).resolve()
+                page = self.server.root.joinpath(*parts).resolve()
 
-                if self.server.root == self.page or self.server.root in self.page.parents:
-                    if self.page.is_dir():
-                        self.page = self.page / 'index.html'
-                    if self.page.is_file():
-                        if self.method == b'GET':
-                            self.file = open(str(self.page), 'rb')
-                        headers += 'Content-Length: {:d}\r\n'.format(self.page.stat().st_size)
-                        if self.page.suffix.lower() in CONTENT_TYPE:
-                            headers += 'Content-Type: {:s}\r\n'.format(CONTENT_TYPE[self.page.suffix.lower()])
-                        self.code = OK
+                if self.server.root == page or self.server.root in page.parents:
+                    if page.is_dir():
+                        page = page / 'index.html'
+                    if page.is_file():
+                        if method == b'GET':
+                            file = open(str(page), 'rb')
+                        headers += 'Content-Length: {:d}\r\n'.format(page.stat().st_size)
+                        if page.suffix.lower() in CONTENT_TYPE:
+                            headers += 'Content-Type: {:s}\r\n'.format(CONTENT_TYPE[page.suffix.lower()])
+                        code = OK
                     else:
-                        self.code = NOT_FOUND
+                        code = NOT_FOUND
                 else:
-                    self.code = FORBIDDEN
+                    code = FORBIDDEN
             else:
-                self.code = METHOD_NOT_ALLOWED
+                code = METHOD_NOT_ALLOWED
         except FileNotFoundError as e:
             logging.exception('File not found: %s', e)
             headers = ''
-            self.code = 404
+            code = 404
         except Exception as e:
             logging.exception('Internal error: %s', e)
             headers = ''
 
-        buffer = 'HTTP/1.1 {:d} {:s}\r\n'.format(self.code, STATUS[self.code])
-        buffer += datetime.datetime.utcnow().strftime('Date: %a, %d %b %Y %H:%M:%S UTC\r\n')
-        buffer += 'Server: httpd.py\r\n'
-        buffer += 'Connection: close\r\n'
-        buffer += headers + '\r\n'
+        hdr_buffer = 'HTTP/1.1 {:d} {:s}\r\n'.format(code, STATUS[code])
+        hdr_buffer += datetime.datetime.utcnow().strftime('Date: %a, %d %b %Y %H:%M:%S UTC\r\n')
+        hdr_buffer += 'Server: httpd.py\r\n'
+        hdr_buffer += 'Connection: close\r\n'
+        hdr_buffer += headers + '\r\n'
+        hdr_buffer = hdr_buffer.encode('ascii')
 
-        self.buffer = buffer.encode('ascii')
-        self.server.register(self, self.socket.fileno(), select.EPOLLOUT)
+        return ParsedRequestHeader(status, code, page, hdr_buffer, file)
+
+
+class RequestWrite(Actor):
+    def __init__(self, reader, parsed_request_header):
+        super().__init__(reader.server, reader.socket, reader.time)
+        self.status = parsed_request_header.status
+        self.code = parsed_request_header.code
+        self.page = parsed_request_header.page
+        self.buffer = parsed_request_header.buffer
+        self.file = parsed_request_header.file
 
     def close(self, event):
         logging.info('CLOSE\t%d; write; request: %s; time: %.3f', self.socket.fileno(), self.status,
@@ -257,7 +276,8 @@ class HTTPServer:
                         logging.info("ADD\tCan't add connection: %d", len(self.clients))
                     else:
                         logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
-                        RequestRead(self, client_socket)
+                        reader = RequestRead(self, client_socket)
+                        self.register(reader, client_socket.fileno(), select.EPOLLIN)
                 elif fileno in self.clients:
                     if event & CLIENT_CLOSE_FLAGS:
                         self.poll.unregister(fileno)

@@ -43,7 +43,12 @@ if __name__ == "__main__":
     try:
         while True:
             while len(processes) < opts.workers:
-                p = multiprocessing.Process(target = run, kwargs={"root": opts.root, "host": opts.address, "port": opts.port})
+                p = multiprocessing.Process(
+                    target=run, kwargs={
+                        "root": opts.root,
+                        "host": opts.address,
+                        "port": opts.port
+                    })
                 p.start()
                 logging.info("PROCESS\t new child created: %d", p.pid)
                 processes[p.pid] = p
