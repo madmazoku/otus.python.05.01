@@ -10,14 +10,14 @@ import logging
 import re
 import collections
 
-from async_file_reader import AsyncFileReader
+from async_file_reader import AsyncFileReader, ThreadFileReader
 
 Response = collections.namedtuple("Response", "status code page buffer file")
 
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
 CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
-CLIENT_TIMEOUT = 1000
+CLIENT_TIMEOUT = 10000
 CLIENT_ACCEPT_ERROR_TRIES = 4
 
 END_OF_HEADERS_TERM = b'\r\n\r\n'
@@ -165,17 +165,26 @@ class RequestWrite(Actor):
         self.buffer = parsed_request_header.buffer
         self.file = parsed_request_header.file
 
-        self.server.afr.register(self.socket.fileno(), self.file)
+        if self.file:
+            self.tfr = ThreadFileReader()
+            self.tfr.attach(self.socket.fileno(), self.file)
+            self.tfr.start()
+        else:
+            self.tfr = None
+
+        # self.server.afr.register(self.socket.fileno(), self.file)
 
     def close(self, event):
-        logging.info('CLOSE\t%d; write; request: %s; time: %.3f', self.socket.fileno(), self.status,
+        logging.info('CLOSE\t%d: write; request: %s; time: %.3f', self.socket.fileno(), self.status,
                      self.process_time())
         super().close(event)
 
     def finish(self):
-        logging.info('FINISH\t%d; request: %s; page: %s; code: %d; time: %.3f', self.socket.fileno(), self.status,
+        logging.info('FINISH\t%d: request: %s; page: %s; code: %d; time: %.3f', self.socket.fileno(), self.status,
                      self.page, self.code, self.process_time())
-        self.server.afr.unregister(self.socket.fileno())
+        # self.server.afr.unregister(self.socket.fileno())
+        if self.tfr:
+            self.tfr.finish()
         self.server.unregister(self.socket.fileno())
 
     def act(self, event):
@@ -186,14 +195,14 @@ class RequestWrite(Actor):
             try:
                 sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
                 self.buffer = self.buffer[sent:]
-                logging.info('sent %d: %d', self.socket.fileno(), sent)
             except (ConnectionResetError, BrokenPipeError):
                 self.finish()
                 return
 
         if len(self.buffer) == 0 and self.file is not None:
-            (buffer, eof) = self.server.afr.read(self.socket.fileno())
-            logging.info('AFR: %d; %s', len(buffer), eof)
+            (buffer, eof) = self.tfr.read()
+            # (buffer, eof) = self.server.afr.read(self.socket.fileno())
+            logging.info('TFR\t%d: %d; %s', self.socket.fileno(), len(buffer), eof)
             self.buffer = buffer
             if eof:
                 self.file = None
@@ -317,14 +326,12 @@ class HTTPServer:
                     self.poll.unregister(fileno)
                     self.clients[fileno].close(0)
                 remove.append(fileno)
-        logging.info('ACTORS\t%d: %s', len(actors), actors)
         for fileno in remove:
             del self.clients[fileno]
 
     def wait(self):
         while True:
             events = self.poll.poll(5)
-            logging.info('TICK\t%d; %s', len(events), events)
             for fileno, event in events:
                 self.process_event(fileno, event)
             self.cleanup_clients()

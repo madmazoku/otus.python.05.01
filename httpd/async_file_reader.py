@@ -4,9 +4,62 @@
 import time
 from collections import deque
 import threading
+import logging
 
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
+
+
+class ThreadFileReader(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+
+        self.fileno = None
+        self.file = None
+        self.eof = False
+        self.buffer = b''
+
+
+    def attach(self, fileno, file):
+        self.fileno = fileno
+        self.file = file
+        self.eof = False
+        self.buffer = b''
+
+    def release(self):
+        self.fileno = None
+        self.file = None
+        self.eof = False
+        self.buffer = b''
+
+    def finish(self):
+        with self.lock:
+            if not self.eof:
+                self.eof = True
+        self.join()
+        self.file.close()
+
+    def read(self):
+        with self.lock:
+            buffer = self.buffer
+            self.buffer = b''
+            return (buffer, self.eof)
+
+    def run(self):
+        while(True):
+            with self.lock:
+                if self.eof:
+                    break
+
+                buffer = self.file.read(IO_BUF_SIZE)
+                if len(buffer) == 0:
+                    self.eof = True
+                else:
+                    self.buffer += buffer
+
+
+
 
 
 class AsyncFileReader(threading.Thread):
@@ -84,6 +137,7 @@ class AsyncFileReader(threading.Thread):
                 desc = self.tasks.popleft()
                 desc['locked'] = True
 
+            logging.info("read file from %d:", desc['fileno'])
             file = desc['file']
             buffer = file.read(IO_BUF_SIZE)
             if len(buffer) == 0:
@@ -95,8 +149,9 @@ class AsyncFileReader(threading.Thread):
 
             with self.cv:
                 if desc['eof']:
-                    desc['file'].close()
+                    file.close()
                     desc['file'] = None
+                    logging.info("close file for %d:", desc['fileno'])
                 elif len(desc['buffer']) < IO_BUF_MAXSIZE:
                     self.tasks.append(desc)
                 else:
