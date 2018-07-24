@@ -299,7 +299,7 @@ class HTTPServer:
             if actor.process_time() > CLIENT_TIMEOUT:
                 if actor.socket.fileno() != -1:
                     self.poll.unregister(fileno)
-                    self.clients[fileno].close(event)
+                    self.clients[fileno].close(0)
                 remove.append(fileno)
         logging.info('ACTORS\t%d: %s', len(actors), actors)
         for fileno in remove:
