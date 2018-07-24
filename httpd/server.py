@@ -15,7 +15,7 @@ Response = collections.namedtuple("Response", "status code page buffer file")
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
 CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
-CLIENT_TIMEOUT = 1000
+CLIENT_TIMEOUT = 10000
 CLIENT_ACCEPT_ERROR_TRIES = 4
 
 END_OF_HEADERS_TERM = b'\r\n\r\n'
@@ -164,12 +164,12 @@ class RequestWrite(Actor):
         self.file = parsed_request_header.file
 
     def close(self, event):
-        logging.info('CLOSE\t%d; write; request: %s; time: %.3f', self.socket.fileno(), self.status,
+        logging.info('premature end of write: request: %s; time: %.3f', self.status,
                      self.process_time())
         super().close(event)
 
     def finish(self):
-        logging.info('FINISH\t%d; request: %s; page: %s; code: %d; time: %.3f', self.socket.fileno(), self.status,
+        logging.info('request: %s; page: %s; code: %d; time: %.3f', self.status,
                      self.page, self.code, self.process_time())
         self.server.unregister(self.socket.fileno())
 
@@ -179,7 +179,6 @@ class RequestWrite(Actor):
 
         try:
             sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
-            logging.info('sent %d: %d', self.socket.fileno(), sent)
         except (ConnectionResetError, BrokenPipeError):
             self.finish()
             return
@@ -231,9 +230,7 @@ class HTTPServer:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         self.socket.bind((self.host, self.port))
-        logging.info('BIND\t%d', self.socket.fileno())
         self.socket.listen()
-        logging.info('LISTEN\t%d', self.socket.fileno())
 
         self.poll = select.epoll()
         self.poll.register(self.socket.fileno(), select.EPOLLIN)
@@ -255,14 +252,10 @@ class HTTPServer:
             self.poll.close()
             self.poll = None
 
-        logging.info('Clients closed')
-
         if self.socket is not None and self.socket.fileno() != -1:
             self.socket.shutdown(socket.SHUT_RDWR)
             self.socket.close()
         self.socket = None
-
-        logging.info('Socket released')
 
     def process_event(self, fileno, event):
         if fileno == self.socket.fileno():
@@ -272,12 +265,10 @@ class HTTPServer:
                     client_socket, addr = self.socket.accept()
                     break
                 except BlockingIOError as e:
-                    logging.info('ERR\t%d; %s', trynum, e)
                     time.sleep(trynum * 0.01)
             if client_socket is None:
-                logging.info("ADD\tCan't add connection: %d", len(self.clients))
+                logging.info("Can't add connection: %d", len(self.clients))
             else:
-                logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
                 reader = RequestRead(self, client_socket)
                 self.register(reader, client_socket.fileno(), select.EPOLLIN)
         elif fileno in self.clients:
@@ -288,7 +279,6 @@ class HTTPServer:
             else:
                 self.clients[fileno].act(event)
         else:
-            logging.info("CLOSE\t%d; Remote; Unknown", fileno)
             self.poll.unregister(fileno)
 
     def cleanup_clients(self):
@@ -301,14 +291,12 @@ class HTTPServer:
                     self.poll.unregister(fileno)
                     self.clients[fileno].close(0)
                 remove.append(fileno)
-        logging.info('ACTORS\t%d: %s', len(actors), actors)
         for fileno in remove:
             del self.clients[fileno]
 
     def wait(self):
         while True:
             events = self.poll.poll(5)
-            logging.info('TICK\t%d; %s', len(events), events)
             for fileno, event in events:
                 self.process_event(fileno, event)
             self.cleanup_clients()
