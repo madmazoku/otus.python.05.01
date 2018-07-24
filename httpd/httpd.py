@@ -20,7 +20,6 @@ def run(root, host, port):
     except KeyboardInterrupt:
         logging.info("SERVER\tstop")
     server.close()
-    server.unbind()
 
 
 if __name__ == "__main__":

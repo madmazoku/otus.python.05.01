@@ -10,11 +10,13 @@ import logging
 import re
 import collections
 
-ParsedRequestHeader = collections.namedtuple("ParsedRequestHeader", "status code page buffer file")
+Response = collections.namedtuple("Response", "status code page buffer file")
 
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
 CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
+CLIENT_TIMEOUT = 1000
+CLIENT_ACCEPT_ERROR_TRIES = 4
 
 END_OF_HEADERS_TERM = b'\r\n\r\n'
 END_OF_HEADERS_TERM_LEN = len(END_OF_HEADERS_TERM)
@@ -87,8 +89,8 @@ class RequestRead(Actor):
         end_of_headers = self.buffer.find(END_OF_HEADERS_TERM, self.check_index)
         if end_of_headers != -1:
             header = self.buffer[:end_of_headers]
-            parsed_request_header = self.parse_request_header(header)
-            self.buffer = self.buffer[end_of_headers + END_OF_HEADERS_TERM_LEN:]
+            parsed_request_header = self.prepare_response(header)
+            self.buffer = b''
 
             writer = RequestWrite(self, parsed_request_header)
             self.server.register(writer, self.socket.fileno(), select.EPOLLOUT)
@@ -96,7 +98,7 @@ class RequestRead(Actor):
             buffer_len = len(self.buffer)
             self.check_index = 0 if buffer_len < END_OF_HEADERS_TERM_LEN else buffer_len - END_OF_HEADERS_TERM_LEN
 
-    def parse_request_header(self, header):
+    def prepare_response(self, header):
         lines = header.split(b'\r\n')
         status = lines.pop(0)
 
@@ -149,7 +151,7 @@ class RequestRead(Actor):
         hdr_buffer += headers + '\r\n'
         hdr_buffer = hdr_buffer.encode('ascii')
 
-        return ParsedRequestHeader(status, code, page, hdr_buffer, file)
+        return Response(status, code, page, hdr_buffer, file)
 
 
 class RequestWrite(Actor):
@@ -177,6 +179,7 @@ class RequestWrite(Actor):
 
         try:
             sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
+            logging.info('sent %d: %d', self.socket.fileno(), sent)
         except (ConnectionResetError, BrokenPipeError):
             self.finish()
             return
@@ -222,11 +225,18 @@ class HTTPServer:
     def bind(self):
         if self.socket is not None:
             self.close()
+
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM | socket.SOCK_NONBLOCK)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         self.socket.bind((self.host, self.port))
         logging.info('BIND\t%d', self.socket.fileno())
+        self.socket.listen()
+        logging.info('LISTEN\t%d', self.socket.fileno())
+
+        self.poll = select.epoll()
+        self.poll.register(self.socket.fileno(), select.EPOLLIN)
 
     def close(self):
         remove = []
@@ -247,57 +257,58 @@ class HTTPServer:
 
         logging.info('Clients closed')
 
-    def unbind(self):
         if self.socket is not None and self.socket.fileno() != -1:
             self.socket.shutdown(socket.SHUT_RDWR)
             self.socket.close()
         self.socket = None
 
-    def wait(self, timeout=None):
-        self.socket.listen()
-        logging.info('LISTEN\t%d', self.socket.fileno())
+        logging.info('Socket released')
 
-        self.poll = select.epoll()
-        self.poll.register(self.socket.fileno(), select.EPOLLIN)
+    def process_event(self, fileno, event):
+        if fileno == self.socket.fileno():
+            client_socket = None
+            for trynum in range(1, CLIENT_ACCEPT_ERROR_TRIES):
+                try:
+                    client_socket, addr = self.socket.accept()
+                    break
+                except BlockingIOError as e:
+                    logging.info('ERR\t%d; %s', trynum, e)
+                    time.sleep(trynum * 0.01)
+            if client_socket is None:
+                logging.info("ADD\tCan't add connection: %d", len(self.clients))
+            else:
+                logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
+                reader = RequestRead(self, client_socket)
+                self.register(reader, client_socket.fileno(), select.EPOLLIN)
+        elif fileno in self.clients:
+            if event & CLIENT_CLOSE_FLAGS:
+                self.poll.unregister(fileno)
+                self.clients[fileno].close(event)
+                del self.clients[fileno]
+            else:
+                self.clients[fileno].act(event)
+        else:
+            logging.info("CLOSE\t%d; Remote; Unknown", fileno)
+            self.poll.unregister(fileno)
+
+    def cleanup_clients(self):
+        remove = []
+        actors = []
+        for fileno, actor in self.clients.items():
+            actors.append('({:d}, {:.3f})'.format(actor.socket.fileno(), actor.process_time()))
+            if actor.process_time() > CLIENT_TIMEOUT:
+                if actor.socket.fileno() != -1:
+                    self.poll.unregister(fileno)
+                    self.clients[fileno].close(event)
+                remove.append(fileno)
+        logging.info('ACTORS\t%d: %s', len(actors), actors)
+        for fileno in remove:
+            del self.clients[fileno]
+
+    def wait(self):
         while True:
             events = self.poll.poll(5)
             logging.info('TICK\t%d; %s', len(events), events)
             for fileno, event in events:
-                if fileno == self.socket.fileno():
-                    client_socket = None
-                    for trynum in range(1, 4):
-                        try:
-                            client_socket, addr = self.socket.accept()
-                            break
-                        except BlockingIOError as e:
-                            logging.info('ERR\t%d; %s', trynum, e)
-                            time.sleep(trynum * 0.01)
-                    if client_socket is None:
-                        logging.info("ADD\tCan't add connection: %d", len(self.clients))
-                    else:
-                        logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
-                        reader = RequestRead(self, client_socket)
-                        self.register(reader, client_socket.fileno(), select.EPOLLIN)
-                elif fileno in self.clients:
-                    if event & CLIENT_CLOSE_FLAGS:
-                        self.poll.unregister(fileno)
-                        self.clients[fileno].close(event)
-                        del self.clients[fileno]
-                    else:
-                        self.clients[fileno].act(event)
-                else:
-                    logging.info("CLOSE\t%d; Remote; Unknown", fileno)
-                    self.poll.unregister(fileno)
-
-            remove = []
-            actors = []
-            for fileno, actor in self.clients.items():
-                actors.append('({:d}, {:.3f})'.format(actor.socket.fileno(), actor.process_time()))
-                if actor.process_time() > 1000:
-                    if actor.socket.fileno() != -1:
-                        self.poll.unregister(fileno)
-                        self.clients[fileno].close(event)
-                    remove.append(fileno)
-            logging.info('ACTORS\t%d: %s', len(actors), actors)
-            for fileno in remove:
-                del self.clients[fileno]
+                self.process_event(fileno, event)
+            self.cleanup_clients()
