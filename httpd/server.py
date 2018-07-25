@@ -10,12 +10,15 @@ import logging
 import re
 import collections
 
-from async_file_reader import AsyncFileReader, ThreadFileReader
+from async_file_reader import AsyncFileReader
 
 Response = collections.namedtuple("Response", "status code page buffer file")
 
+
+USE_AFR = True
 if not hasattr(socket, "SO_REUSEPORT"):
     socket.SO_REUSEPORT = 15
+
 
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
@@ -61,8 +64,11 @@ class Actor(object):
         pass
 
     def close(self, event):
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+            self.socket.close()
+        except OSError as e:
+            logging.info("socket close error %s", e)
 
     def process_time(self):
         return (time.time() - self.time) * 1000
@@ -168,20 +174,24 @@ class RequestWrite(Actor):
         self.buffer = parsed_request_header.buffer
         self.file = parsed_request_header.file
 
-        if self.file:
+        if USE_AFR and self.file:
             self.server.afr.register(self.socket.fileno(), self.file)
 
     def close(self, event):
         logging.info('CLOSE\t%d: write; request: %s; time: %.3f', self.socket.fileno(), self.status,
                      self.process_time())
-        self.server.afr.unregister(self.socket.fileno())
+        if USE_AFR and self.file:
+            self.server.afr.unregister(self.socket.fileno())
+            self.file.close()
         super().close(event)
 
     def finish(self):
         logging.info('FINISH\t%d: request: %s; page: %s; code: %d; time: %.3f', self.socket.fileno(), self.status,
                      self.page, self.code, self.process_time())
-        self.server.afr.unregister(self.socket.fileno())
+        if USE_AFR and self.file:
+            self.server.afr.unregister(self.socket.fileno())
         self.server.unregister(self.socket.fileno())
+        super().close(0)
 
     def act(self, event):
         if not event & select.EPOLLOUT:
@@ -191,12 +201,20 @@ class RequestWrite(Actor):
             try:
                 sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
                 self.buffer = self.buffer[sent:]
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError) as e:
+                logging.info('Send error: %s', e)
                 self.finish()
                 return
 
         if len(self.buffer) == 0 and self.file is not None:
-            (buffer, eof) = self.server.afr.read(self.socket.fileno())
+            (buffer, eof) = (None, False)
+            if USE_AFR:
+                (buffer, eof) = self.server.afr.read(self.socket.fileno())
+            else:
+                buffer = self.file.read(IO_BUF_SIZE)
+                if len(buffer) == 0:
+                    eof = True
+
             self.buffer = buffer
             if eof:
                 self.file.close()
@@ -205,7 +223,6 @@ class RequestWrite(Actor):
 
         if len(self.buffer) == 0 and self.file is None:
             self.finish()
-            self.socket.shutdown(socket.SHUT_RDWR)
 
 
 class HTTPServer:
@@ -243,9 +260,7 @@ class HTTPServer:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         self.socket.bind((self.host, self.port))
-        logging.info('BIND\t%d', self.socket.fileno())
         self.socket.listen()
-        logging.info('LISTEN\t%d', self.socket.fileno())
 
         self.poll = select.epoll()
         self.poll.register(self.socket.fileno(), select.EPOLLIN)
@@ -267,14 +282,10 @@ class HTTPServer:
             self.poll.close()
             self.poll = None
 
-        logging.info('Clients closed')
-
         if self.socket is not None and self.socket.fileno() != -1:
             self.socket.shutdown(socket.SHUT_RDWR)
             self.socket.close()
         self.socket = None
-
-        logging.info('Socket released')
 
         self.afr.finish()
 
@@ -292,7 +303,6 @@ class HTTPServer:
             if client_socket is None:
                 logging.info("ADD\tCan't add connection: %d", len(self.clients))
             else:
-                logging.info("ADD\t%d; Pending connections: %d", client_socket.fileno(), len(self.clients))
                 reader = RequestRead(self, client_socket)
                 self.register(reader, client_socket.fileno(), select.EPOLLIN)
         elif fileno in self.clients:
