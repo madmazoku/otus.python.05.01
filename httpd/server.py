@@ -10,7 +10,15 @@ import logging
 import re
 import collections
 
+from async_file_reader import AsyncFileReader
+
 Response = collections.namedtuple("Response", "status code page buffer file")
+
+
+USE_AFR = True
+if not hasattr(socket, "SO_REUSEPORT"):
+    socket.SO_REUSEPORT = 15
+
 
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
@@ -56,8 +64,11 @@ class Actor(object):
         pass
 
     def close(self, event):
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+            self.socket.close()
+        except OSError as e:
+            logging.info("socket close error %s", e)
 
     def process_time(self):
         return (time.time() - self.time) * 1000
@@ -163,39 +174,55 @@ class RequestWrite(Actor):
         self.buffer = parsed_request_header.buffer
         self.file = parsed_request_header.file
 
+        if USE_AFR and self.file:
+            self.server.afr.register(self.socket.fileno(), self.file)
+
     def close(self, event):
         logging.info('premature end of write: request: %s; time: %.3f', self.status,
                      self.process_time())
+        if USE_AFR and self.file:
+            self.server.afr.unregister(self.socket.fileno())
+            self.file.close()
         super().close(event)
 
     def finish(self):
         logging.info('request: %s; page: %s; code: %d; time: %.3f', self.status,
                      self.page, self.code, self.process_time())
+        if USE_AFR and self.file:
+            self.server.afr.unregister(self.socket.fileno())
         self.server.unregister(self.socket.fileno())
+        super().close(0)
 
     def act(self, event):
         if not event & select.EPOLLOUT:
             return
 
-        try:
-            sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
-        except (ConnectionResetError, BrokenPipeError):
-            self.finish()
-            return
-
-        self.buffer = self.buffer[sent:]
+        if len(self.buffer) != 0:
+            try:
+                sent = self.socket.send(self.buffer[:IO_BUF_SIZE])
+                self.buffer = self.buffer[sent:]
+            except (ConnectionResetError, BrokenPipeError) as e:
+                logging.info('Send error: %s', e)
+                self.finish()
+                return
 
         if len(self.buffer) == 0 and self.file is not None:
-            buffer = self.file.read(IO_BUF_SIZE)
-            if len(buffer) == 0:
+            (buffer, eof) = (None, False)
+            if USE_AFR:
+                (buffer, eof) = self.server.afr.read(self.socket.fileno())
+            else:
+                buffer = self.file.read(IO_BUF_SIZE)
+                if len(buffer) == 0:
+                    eof = True
+
+            self.buffer = buffer
+            if eof:
                 self.file.close()
                 self.file = None
-            else:
-                self.buffer = buffer
+
 
         if len(self.buffer) == 0 and self.file is None:
             self.finish()
-            self.socket.shutdown(socket.SHUT_RDWR)
 
 
 class HTTPServer:
@@ -224,6 +251,9 @@ class HTTPServer:
     def bind(self):
         if self.socket is not None:
             self.close()
+
+        self.afr = AsyncFileReader()
+        self.afr.start()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM | socket.SOCK_NONBLOCK)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
@@ -256,6 +286,9 @@ class HTTPServer:
             self.socket.shutdown(socket.SHUT_RDWR)
             self.socket.close()
         self.socket = None
+
+        self.afr.finish()
+
 
     def process_event(self, fileno, event):
         if fileno == self.socket.fileno():

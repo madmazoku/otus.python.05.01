@@ -21,7 +21,6 @@ def run(root, host, port):
         logging.info("SERVER\tstop")
     server.close()
 
-
 if __name__ == "__main__":
     op = OptionParser()
     op.add_option("-a", "--address", action="store", type=str, default="localhost")
