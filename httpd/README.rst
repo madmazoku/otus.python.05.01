@@ -49,7 +49,7 @@ Server execution
 
 .. code-block::
 
-    ./httpd.py -p 8080 -w 4 -l test.log -r ../material/http-test-suite/
+    ./httpd.py -p 8080 -w 8 -l test.log -r ../material/http-test-suite/
 
 Feature testing
 ---------------
@@ -91,11 +91,11 @@ Light:
 .. code-block:: 
 
     http-test-suite$ ab -n 50000 -c 100 -r http://127.0.0.1:8080/
-    This is ApacheBench, Version 2.3 <$Revision: 1706008 $>
+    This is ApacheBench, Version 2.3 <$Revision: 1807734 $>
     Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
     Licensed to The Apache Software Foundation, http://www.apache.org/
 
-    Benchmarking 127.0.0.1 (be patient)
+    Benchmarking localhost (be patient)
     Completed 5000 requests
     Completed 10000 requests
     Completed 15000 requests
@@ -110,53 +110,53 @@ Light:
 
 
     Server Software:        httpd.py
-    Server Hostname:        127.0.0.1
+    Server Hostname:        localhost
     Server Port:            8080
 
     Document Path:          /
     Document Length:        0 bytes
 
     Concurrency Level:      100
-    Time taken for tests:   18.379 seconds
+    Time taken for tests:   1.661 seconds
     Complete requests:      50000
     Failed requests:        0
     Non-2xx responses:      50000
     Total transferred:      5000000 bytes
     HTML transferred:       0 bytes
-    Requests per second:    2720.54 [#/sec] (mean)
-    Time per request:       36.757 [ms] (mean)
-    Time per request:       0.368 [ms] (mean, across all concurrent requests)
-    Transfer rate:          265.68 [Kbytes/sec] received
+    Requests per second:    30097.20 [#/sec] (mean)
+    Time per request:       3.323 [ms] (mean)
+    Time per request:       0.033 [ms] (mean, across all concurrent requests)
+    Transfer rate:          2939.18 [Kbytes/sec] received
 
     Connection Times (ms)
                   min  mean[+/-sd] median   max
-    Connect:        0    0   0.9      0      31
-    Processing:     1   36  29.7     31     268
-    Waiting:        0   36  29.7     30     268
-    Total:          1   37  29.7     31     268
+    Connect:        0    0   0.4      0       3
+    Processing:     0    3   2.8      2      23
+    Waiting:        0    3   2.8      2      22
+    Total:          0    3   2.8      3      23
 
     Percentage of the requests served within a certain time (ms)
-      50%     31
-      66%     43
-      75%     52
-      80%     58
-      90%     74
-      95%     89
-      98%    119
-      99%    139
-     100%    268 (longest request)
+      50%      3
+      66%      4
+      75%      4
+      80%      5
+      90%      7
+      95%      9
+      98%     11
+      99%     13
+     100%     23 (longest request)
 
 
-Heavy:
+Heavy Async File Read:
 
 .. code-block:: 
 
     http-test-suite$ ab -n 50000 -c 100 -r http://127.0.0.1:8080/httptest/wikipedia_russia.html
-    This is ApacheBench, Version 2.3 <$Revision: 1706008 $>
+    This is ApacheBench, Version 2.3 <$Revision: 1807734 $>
     Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
     Licensed to The Apache Software Foundation, http://www.apache.org/
 
-    Benchmarking 127.0.0.1 (be patient)
+    Benchmarking localhost (be patient)
     Completed 5000 requests
     Completed 10000 requests
     Completed 15000 requests
@@ -171,37 +171,98 @@ Heavy:
 
 
     Server Software:        httpd.py
-    Server Hostname:        127.0.0.1
+    Server Hostname:        localhost
     Server Port:            8080
 
     Document Path:          /httptest/wikipedia_russia.html
     Document Length:        954824 bytes
 
     Concurrency Level:      100
-    Time taken for tests:   186.122 seconds
+    Time taken for tests:   64.666 seconds
     Complete requests:      50000
     Failed requests:        0
     Total transferred:      47748300000 bytes
     HTML transferred:       47741200000 bytes
-    Requests per second:    268.64 [#/sec] (mean)
-    Time per request:       372.244 [ms] (mean)
-    Time per request:       3.722 [ms] (mean, across all concurrent requests)
-    Transfer rate:          250530.57 [Kbytes/sec] received
+    Requests per second:    773.21 [#/sec] (mean)
+    Time per request:       129.331 [ms] (mean)
+    Time per request:       1.293 [ms] (mean, across all concurrent requests)
+    Transfer rate:          721081.91 [Kbytes/sec] received
 
     Connection Times (ms)
                   min  mean[+/-sd] median   max
-    Connect:        0    0   0.7      0      55
-    Processing:    49  372 128.9    362     885
-    Waiting:        0    8   5.3      6      97
-    Total:         49  372 128.8    362     885
+    Connect:        0    0   0.2      0      16
+    Processing:     7  129  68.8    118     521
+    Waiting:        0    2   4.0      1      61
+    Total:          7  129  68.8    118     521
 
     Percentage of the requests served within a certain time (ms)
-      50%    362
-      66%    418
-      75%    457
-      80%    482
-      90%    544
-      95%    602
-      98%    663
-      99%    700
-     100%    885 (longest request)
+      50%    118
+      66%    145
+      75%    165
+      80%    178
+      90%    217
+      95%    258
+      98%    314
+      99%    362
+     100%    521 (longest request)
+
+
+Heavy Sync File Read:
+
+.. code-block:: 
+
+    http-test-suite$ ab -n 50000 -c 100 -r http://127.0.0.1:8080/httptest/wikipedia_russia.html
+    This is ApacheBench, Version 2.3 <$Revision: 1807734 $>
+    Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+    Licensed to The Apache Software Foundation, http://www.apache.org/
+
+    Benchmarking localhost (be patient)
+    Completed 5000 requests
+    Completed 10000 requests
+    Completed 15000 requests
+    Completed 20000 requests
+    Completed 25000 requests
+    Completed 30000 requests
+    Completed 35000 requests
+    Completed 40000 requests
+    Completed 45000 requests
+    Completed 50000 requests
+    Finished 50000 requests
+
+
+    Server Software:        httpd.py
+    Server Hostname:        localhost
+    Server Port:            8080
+
+    Document Path:          /httptest/wikipedia_russia.html
+    Document Length:        954824 bytes
+
+    Concurrency Level:      100
+    Time taken for tests:   22.760 seconds
+    Complete requests:      50000
+    Failed requests:        0
+    Total transferred:      47748300000 bytes
+    HTML transferred:       47741200000 bytes
+    Requests per second:    2196.84 [#/sec] (mean)
+    Time per request:       45.520 [ms] (mean)
+    Time per request:       0.455 [ms] (mean, across all concurrent requests)
+    Transfer rate:          2048733.87 [Kbytes/sec] received
+
+    Connection Times (ms)
+                  min  mean[+/-sd] median   max
+    Connect:        0    1   0.1      1       4
+    Processing:    18   45   2.2     44      78
+    Waiting:        0    1   1.2      1      29
+    Total:         19   45   2.2     45      78
+
+    Percentage of the requests served within a certain time (ms)
+      50%     45
+      66%     46
+      75%     46
+      80%     47
+      90%     48
+      95%     49
+      98%     50
+      99%     52
+     100%     78 (longest request)
+
