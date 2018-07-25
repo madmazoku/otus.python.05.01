@@ -14,6 +14,9 @@ from async_file_reader import AsyncFileReader, ThreadFileReader
 
 Response = collections.namedtuple("Response", "status code page buffer file")
 
+if not hasattr(socket, "SO_REUSEPORT"):
+    socket.SO_REUSEPORT = 15
+
 IO_BUF_SIZE = 4 * 1 << 10
 IO_BUF_MAXSIZE = 10 * 1 << 20
 CLIENT_CLOSE_FLAGS = select.EPOLLERR | select.EPOLLHUP
@@ -166,25 +169,18 @@ class RequestWrite(Actor):
         self.file = parsed_request_header.file
 
         if self.file:
-            self.tfr = ThreadFileReader()
-            self.tfr.attach(self.socket.fileno(), self.file)
-            self.tfr.start()
-        else:
-            self.tfr = None
-
-        # self.server.afr.register(self.socket.fileno(), self.file)
+            self.server.afr.register(self.socket.fileno(), self.file)
 
     def close(self, event):
         logging.info('CLOSE\t%d: write; request: %s; time: %.3f', self.socket.fileno(), self.status,
                      self.process_time())
+        self.server.afr.unregister(self.socket.fileno())
         super().close(event)
 
     def finish(self):
         logging.info('FINISH\t%d: request: %s; page: %s; code: %d; time: %.3f', self.socket.fileno(), self.status,
                      self.page, self.code, self.process_time())
-        # self.server.afr.unregister(self.socket.fileno())
-        if self.tfr:
-            self.tfr.finish()
+        self.server.afr.unregister(self.socket.fileno())
         self.server.unregister(self.socket.fileno())
 
     def act(self, event):
@@ -200,18 +196,12 @@ class RequestWrite(Actor):
                 return
 
         if len(self.buffer) == 0 and self.file is not None:
-            (buffer, eof) = self.tfr.read()
-            # (buffer, eof) = self.server.afr.read(self.socket.fileno())
-            logging.info('TFR\t%d: %d; %s', self.socket.fileno(), len(buffer), eof)
+            (buffer, eof) = self.server.afr.read(self.socket.fileno())
             self.buffer = buffer
             if eof:
+                self.file.close()
                 self.file = None
-            # buffer = self.file.read(IO_BUF_SIZE)
-            # if len(buffer) == 0:
-            #     self.file.close()
-            #     self.file = None
-            # else:
-            #     self.buffer = buffer
+
 
         if len(self.buffer) == 0 and self.file is None:
             self.finish()

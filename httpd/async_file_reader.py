@@ -7,7 +7,7 @@ import threading
 import logging
 
 IO_BUF_SIZE = 4 * 1 << 10
-IO_BUF_MAXSIZE = 10 * 1 << 20
+IO_BUF_MAXSIZE = 4 * 1 << 20
 
 
 class ThreadFileReader(threading.Thread):
@@ -137,7 +137,6 @@ class AsyncFileReader(threading.Thread):
                 desc = self.tasks.popleft()
                 desc['locked'] = True
 
-            logging.info("read file from %d:", desc['fileno'])
             file = desc['file']
             buffer = file.read(IO_BUF_SIZE)
             if len(buffer) == 0:
@@ -149,67 +148,10 @@ class AsyncFileReader(threading.Thread):
 
             with self.cv:
                 if desc['eof']:
-                    file.close()
-                    desc['file'] = None
-                    logging.info("close file for %d:", desc['fileno'])
+                    pass
                 elif len(desc['buffer']) < IO_BUF_MAXSIZE:
                     self.tasks.append(desc)
                 else:
                     desc['tasked'] = False
                 desc['locked'] = False
-
-
-if __name__ == "__main__":
-    afr = AsyncFileReader()
-    try:
-        print("start")
-        afr.start()
-        print("\tstarted")
-
-        b = b''
-        file = open("./test.log", "rb")
-        while(True):
-            bf = file.read()
-            print("BF {:d}".format(len(bf)))
-            if len(bf) == 0:
-                file.close()
-                break
-            b += bf
-        print("B {:d}".format(len(b)))
-
-        file1 = open("./test.log", "rb")
-        afr.register(1, file1)
-
-        file2 = open("./test.log", "rb")
-        afr.register(2, file2)
-
-        b1 = b''
-        b2 = b''
-
-        while file1 is not None or file2 is not None:
-            print("read")
-            (bf1, eof1) = afr.read(1)
-            b1 += bf1
-            print("\tbf1: {:d}".format(len(bf1)))
-            (bf2, eof2) = afr.read(2)
-            b2 += bf2
-            print("\tbf2: {:d}".format(len(bf2)))
-
-            if eof1:
-                print("\tf1 eof")
-                file1 = None
-            if eof2:
-                print("\tf2 eof")
-                file2 = None
-            time.sleep(0.5)
-
-        print("B1 {:d}".format(len(b1)))
-        print("B2 {:d}".format(len(b2)))
-
-        time.sleep(1)
-    except KeyboardInterrupt:
-        print("stop")
-    finally:
-        print("finish")
-        afr.finish()
-        print("\tfinished")
+                self.cv.notify()
